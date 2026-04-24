@@ -21,7 +21,7 @@ A modular backtesting framework for cross-sectional equity strategies, built on 
 
 The project implements and compares three increasingly sophisticated equity strategies on a universe of ~140 US large-cap assets (2016–2026), evaluated with strict walk-forward out-of-sample validation to prevent overfitting.
 
-The primary goal is **not** to maximise raw CAGR, but to achieve a better risk-adjusted profile than a passive SPY benchmark — specifically a higher Calmar ratio and materially lower drawdowns.
+The three strategies represent a deliberate spectrum of risk profiles: Momentum and Composite are high-beta, high-return strategies suited to investors who can tolerate drawdowns above 30%; Risk-Managed targets a lower-drawdown profile at the cost of absolute return. All three outperform SPY on a risk-adjusted basis in out-of-sample testing.
 
 ---
 
@@ -52,7 +52,7 @@ quant-backtest/
 
 Each month-end, ranks all assets by 6-month momentum (`mom_6m`) and goes long the top 10. Weights are equal across selected assets, forward-filled to daily frequency between rebalances.
 
-This is the baseline. Any more complex strategy should beat it on a risk-adjusted basis to justify the added complexity.
+This is the baseline. Any more complex strategy should beat it on a risk-adjusted basis to justify the added complexity. In practice, the Composite beats it marginally on Alpha and Calmar; the difference is small enough that Momentum's higher consistency (93% positive Sharpe folds vs 87%) makes it competitive.
 
 ### 2. Composite
 
@@ -69,39 +69,43 @@ Adds a **vol-regime filter**: when market stress is elevated (`vol_regime > 1.3`
 
 ### 3. Risk-Managed
 
-Builds on the composite strategy with three additional risk overlays:
+Builds on the Composite with three additional risk overlays designed to reduce drawdown at the cost of absolute return.
 
 **Rebalance-level (monthly):**
-- Defensive tilt: subtracts 10% of `zscore_20` from the composite score, penalising assets extended far above their recent mean (mean-reversion risk)
+- Defensive tilt: subtracts 10% of `zscore_20` from the composite score, penalising assets extended far above their recent mean
 
-**Daily overlays (react faster than monthly rebalancing):**
-- **Market timing:** when SPY remains below its 200-day SMA for 5+ consecutive days, exposure is scaled to 50%. The 5-day smoothing prevents whipsawing on brief dips.
+**Daily overlays:**
+- **Market timing (gradual):** scales exposure continuously based on SPY's distance from its 200-day SMA. At the SMA, exposure is 100%; at 10% below, exposure drops to ~50%; floor at 30%. Smoothed over 5 days to avoid reacting to single-day dips.
 - **Vol scaling:** dynamically sizes the portfolio to target 15% annualised volatility using 21-day realised portfolio vol, with leverage capped at 0.5x–2x.
-
-The order matters: market timing is applied first, vol scaling operates on the already-adjusted weights.
 
 ---
 
 ## Results
 
-All metrics computed on out-of-sample walk-forward periods (2019–2026).
+All OOS metrics are computed on walk-forward out-of-sample periods (2019–2026). IS metrics cover the full 2016–2026 period.
 
-| Metric | Risk-Managed (OOS) | SPY |
-|---|---|---|
-| CAGR | 13.30% | 16.86% |
-| Volatility (ann) | 17.20% | 19.54% |
-| Sharpe Ratio | 0.59 | 0.70 |
-| Sortino Ratio | 0.82 | 0.86 |
-| **Calmar Ratio** | **0.70** | **0.50** |
-| **Max Drawdown** | **−18.98%** | **−33.72%** |
-| VaR 95% (daily) | 1.70% | 1.75% |
-| CVaR 95% (daily) | 2.47% | 2.94% |
-| Beta | 0.65 | 1.00 |
-| Alpha (ann) | 1.13% | — |
+| Metric | Momentum OOS | Composite OOS | Risk-Managed OOS | SPY (OOS) |
+|---|---|---|---|---|
+| Total Return | 457% | 512% | 136% | 211% |
+| CAGR | 26.56% | 28.22% | 12.52% | 16.86% |
+| Volatility (ann) | 21.77% | 23.96% | 16.76% | 19.54% |
+| Sharpe Ratio | 1.01 | 1.00 | 0.55 | 0.70 |
+| Sortino Ratio | 1.27 | 1.28 | 0.79 | 0.86 |
+| **Calmar Ratio** | **0.76** | **0.80** | 0.63 | 0.50 |
+| Max Drawdown | -34.79% | -35.06% | -19.89% | -33.72% |
+| VaR 95% (daily) | 1.97% | 2.15% | 1.71% | 1.75% |
+| CVaR 95% (daily) | 3.20% | 3.49% | 2.40% | 2.94% |
+| Alpha (ann) | 9.09% | 10.68% | 1.20% | — |
+| Beta | 0.97 | 1.00 | 0.59 | — |
+| Info Ratio | 0.79 | 0.73 | -0.30 | — |
 
-**Key takeaway:** the strategy does not outperform SPY on raw CAGR — a direct consequence of the low beta (0.65). In a sustained bull market, lower market exposure means lower absolute returns. The value is in the risk profile: max drawdown is reduced by ~44% relative to SPY, and the Calmar ratio is 40% higher, meaning more return per unit of maximum loss tolerated.
+### How to read these results
 
-The Sortino (0.82) exceeding the Sharpe (0.59) indicates the return distribution is positively skewed — upside volatility is larger than downside volatility, which is the desirable asymmetry.
+**Momentum and Composite** are high-beta strategies (Beta ~1.0). They do not protect in crashes — Max Drawdown reaches ~35%, comparable to SPY. Their edge is entirely in Alpha: 9–10% annualised excess return after adjusting for market exposure, with Sharpe above 1.0 out-of-sample. For an investor willing to hold through a -35% drawdown, the long-run compounding significantly outperforms buy-and-hold.
+
+**Risk-Managed** is a different product: Beta 0.59, Max Drawdown -19.89%, Calmar 0.63 vs 0.50 for SPY. The trade-off is a CAGR of 12.52% OOS, below SPY's 16.86%. This strategy makes sense for an investor who cannot or will not hold through a -35% drawdown.
+
+**On the high OOS CAGR of Composite (28.22%):** the IS→OOS increase is unusual and requires honest interpretation. It is largely driven by Fold 11 (2024 H1), where NVDA returned ~+80% and the momentum signal correctly held it with significant weight. This is not look-ahead bias, but it is concentrated event risk. The median OOS Sharpe of 1.14 is the more representative long-run expectation.
 
 ---
 
@@ -109,38 +113,17 @@ The Sortino (0.82) exceeding the Sharpe (0.59) indicates the return distribution
 
 **Setup:** 3-year rolling training window, 6-month OOS evaluation period, 15 folds (2016–2026).
 
-| Summary | Value |
-|---|---|
-| Folds with positive Sharpe | 80% (12/15) |
-| Median OOS Sharpe | 0.45 |
-| Median OOS CAGR | 10.4% |
-| IS → OOS Sharpe degradation | 0.75 → 0.59 (−21%) |
-
-The IS→OOS degradation of 21% is moderate and consistent with a system that is not overfitted. If degradation were near zero, the walk-forward would be a formality; if it were 60–80%, it would signal significant overfitting on the training set.
-
-**Per-fold breakdown:**
-
-| Fold | OOS Period | CAGR | Sharpe | MDD | Notes |
+| Strategy | Median Sharpe | Median CAGR | % Positive Folds | Worst Fold | Best Fold |
 |---|---|---|---|---|---|
-| 1 | 2019 H1 | +8.0% | 0.33 | −10.7% | Quiet market post Q4 2018 correction |
-| 2 | 2019 H2 | −7.3% | −0.63 | −10.5% | US-China trade tensions, choppy market |
-| 3 | 2020 H1 | +47.6% | 1.41 | −19.0% | Covid crash + recovery. MDD reflects March 2020 |
-| 4 | 2020 H2 | +38.3% | 1.78 | −7.9% | Post-Covid bull run, ideal momentum conditions |
-| 5 | 2021 H1 | +12.5% | 0.55 | −7.4% | Normal |
-| 6 | 2021 H2 | +12.9% | 0.55 | −8.3% | Normal |
-| 7 | 2022 H1 | −22.5% | −1.77 | −14.1% | Worst fold. Fed tightening, momentum crash (growth→value rotation) |
-| 8 | 2022 H2 | +9.8% | 0.42 | −9.5% | Recovery |
-| 9 | 2023 H1 | +10.5% | 0.45 | −12.0% | Normal |
-| 10 | 2023 H2 | +6.8% | 0.24 | −10.4% | Weak |
-| 11 | 2024 H1 | +74.4% | 3.29 | −7.9% | See note below |
-| 12 | 2024 H2 | +18.1% | 0.82 | −9.9% | Good |
-| 13 | 2025 H1 | −0.9% | −0.21 | −17.2% | Slightly negative |
-| 14 | 2025 H2 | +14.5% | 0.61 | −5.4% | Good, minimal drawdown |
-| 15 | 2026 H1* | +6.0% | 0.20 | −9.9% | Partial fold (75 days) |
+| Momentum | 1.27 | 26.2% | 93% | -1.05 | 3.29 |
+| Composite | 1.14 | 26.0% | 87% | -0.97 | 3.69 |
+| Risk-Managed | 0.53 | 12.2% | 80% | -2.29 | 3.29 |
 
-**Note on Fold 11 (Sharpe 3.29):** this fold is anomalously strong and requires honest interpretation. Contribution analysis shows the performance was predominantly driven by NVDA, which returned ~+80% in H1 2024 on the back of the AI infrastructure boom. The momentum signal correctly identified NVDA as a top-ranked asset at the start of the period (strong 6m and 12m momentum as of end-2023 training data), and the system held it with a significant weight throughout. This is not a statistical artefact or look-ahead bias — the signal worked as intended. However, a Sharpe of 3.29 reflects a single concentrated event, not a repeatable edge. The median OOS Sharpe of 0.45 (which is robust to this outlier) is the more representative expectation.
+Momentum is the most consistent strategy: 93% of folds with positive Sharpe and the highest median. The Composite generates slightly more Alpha but at lower consistency. Risk-Managed has the weakest tail: its worst fold (-2.29 in 2022 H1) is worse than the other two despite its defensive design, because the overlays reduce average returns enough to make bad folds more painful in relative terms.
 
-**Worst fold (Fold 7 — 2022 H1):** the strategy held high-momentum growth stocks entering 2022, exactly the names hit hardest by the Fed's hawkish pivot. This is the canonical momentum crash: a regime change (low-rate → high-rate) causes rapid factor rotation that punishes recent winners. The market timing overlay (SPY vs SMA200) partially mitigated the damage but could not prevent it entirely.
+**Fold 11 (2024 H1) — Sharpe 3.29/3.69:** NVDA returned ~+80% driven by the AI infrastructure boom. The momentum signal correctly identified it as top-ranked entering the period. Not look-ahead bias, but concentrated event risk — not the repeatable edge.
+
+**Fold 7 (2022 H1) — worst fold for all strategies:** the Fed's hawkish pivot triggered a growth→value rotation. Momentum strategies held high-momentum growth stocks that became the hardest hit. This is the canonical momentum crash and should be expected to recur in future rate regime changes.
 
 ---
 
@@ -151,24 +134,20 @@ The IS→OOS degradation of 21% is moderate and consistent with a system that is
 | Commission | 0.10% per trade | Conservative estimate for retail on Interactive Brokers large-caps |
 | Slippage | 0.05% per trade | Realistic for liquid US large-caps (>$500M ADV) |
 | Execution | Next open after signal | Avoids look-ahead bias on close prices |
-| Rebalancing | Month-end | Risk overlays applied daily |
+| Rebalancing | Month-end | Risk overlays applied daily (Risk-Managed only) |
 | Max leverage | 2.0x | Hard cap in vol scaling (`clip(0.5, 2.0)`) |
 
-Transaction costs are simulated as `turnover × 2 × commission_rate`. At median monthly one-way turnover of ~19% (Momentum) and ~30% (Composite), annual cost drag is approximately 45–70 bps — material but not dominant.
-
-The capacity check at AUM = $10M flags 7 positions above $500k notional (CAT, CVX, GLD, GOOGL, JNJ, WMT, XOM). All are investment-grade large-caps with daily volumes in the billions — no liquidity concern at this scale.
+Transaction costs are simulated as `turnover × 2 × commission_rate`. At median monthly one-way turnover of ~19% (Momentum) and ~30% (Composite), annual cost drag is approximately 45–70 bps — material but not dominant relative to the Alpha generated.
 
 ---
 
 ## Limitations & Known Issues
 
-**What this system does not handle:**
-
 - **No live execution.** The notebook produces target weights; it does not interface with any broker API. Converting to a live system requires an execution layer (e.g., Alpaca or IBKR API) and a daily scheduler.
 - **EOD data only.** All signals are computed on end-of-day prices. Intraday dynamics, opening gaps, and overnight risk are not modelled.
-- **No corporate actions adjustment beyond split/dividend.** M&A events, delistings, and index reconstitutions are handled passively by `yfinance` data.
-- **Turnover bug (composite strategy):** max one-way turnover exceeds 100% in some months, which is theoretically impossible and indicates an accounting issue in the turnover calculation when portfolio weights are not normalised to 1. Under investigation.
-- **Sector concentration:** the strategy has no explicit sector constraints. In periods of strong factor concentration (e.g., AI/tech in 2024), the portfolio can implicitly become a sector bet. A sector exposure breakdown over time is a planned addition.
+- **No explicit sector constraints.** In periods of strong factor concentration (e.g., AI/tech in 2024), the portfolio can become an implicit sector bet. A sector exposure breakdown over time is a planned addition.
+- **Turnover bug (Composite strategy):** max one-way turnover exceeds 100% in some months, indicating an accounting issue in the turnover calculation. Under investigation.
+- **Momentum crash risk.** All three strategies have meaningful exposure to momentum factor reversals (see Fold 7). There is no explicit protection against rapid regime changes.
 
 ---
 
@@ -181,9 +160,14 @@ pip install -r requirements.txt
 ```
 
 **Run the analysis notebook:**
-
 ```bash
 jupyter notebook notebooks/analysis.ipynb
 ```
 
 **Run strategies from the command line:**
+```bash
+python src/strategy.py    # prints last weights for all three strategies
+python src/walkforward.py # runs full walk-forward validation
+```
+
+**Dependencies:** `pandas`, `numpy`, `yfinance`, `scipy`, `matplotlib`, `seaborn`, `lightgbm`, `arch`

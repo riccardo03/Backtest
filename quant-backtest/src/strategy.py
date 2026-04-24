@@ -138,6 +138,8 @@ def composite_strategy(
 
         # Vol-regime filter: shrink weights when market stress is elevated
         avg_vol_regime = rebal_vol_reg.loc[date, top].mean()
+        if np.isnan(avg_vol_regime) or avg_vol_regime == 0:
+            avg_vol_regime = 1.0
         scale = np.clip(1.3 / avg_vol_regime, 0.3, 1.0)
         w = w * scale
 
@@ -210,6 +212,8 @@ def risk_managed_strategy(
         w = ranks / ranks.sum()
 
         avg_vol_regime = rebal_vol_reg.loc[date, top].mean()
+        if np.isnan(avg_vol_regime) or avg_vol_regime == 0:
+            avg_vol_regime = 1.0
         scale = np.clip(1.3 / avg_vol_regime, 0.3, 1.0)
         w = w * scale
 
@@ -222,12 +226,13 @@ def risk_managed_strategy(
 
     # --- Overlay 1: market timing (daily) ---
     spy_sma200 = close["SPY"].rolling(200).mean()
-    spy_above  = (close["SPY"] > spy_sma200).reindex(weights.index)
-    # Smooth the signal: require SPY to be below SMA200 for 5 consecutive days
-    # to avoid whipsawing on brief dips
-    spy_risk_off = (~spy_above).rolling(5, min_periods=1).min().astype(bool)
-    dist_from_sma = (close["SPY"] - spy_sma200) / spy_sma200
-    market_scale = (1 + dist_from_sma.clip(-0.5, 0)).rolling(10).mean()
+    dist_pct = (close["SPY"] - spy_sma200) / spy_sma200  # distanza % dalla SMA200
+    
+# Quando dist_pct = 0   → SPY sulla SMA200   → scale = 1.0  (piena esposizione)
+# Quando dist_pct = -0.05 → SPY -5% sotto    → scale ~0.75
+# Quando dist_pct = -0.10 → SPY -10% sotto   → scale ~0.50
+# Quando dist_pct > 0    → SPY sopra SMA200  → scale = 1.0  (cappato a 1)
+    market_scale = (1 + dist_pct * 5).clip(0.3, 1.0).rolling(5, min_periods=1).mean().clip(0.30, 1.0)
     market_scale = market_scale.reindex(weights.index).fillna(1.0)
     weights = weights.mul(market_scale, axis=0)
 

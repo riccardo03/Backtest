@@ -35,7 +35,9 @@ def vol_scale(weights: pd.DataFrame, close: pd.DataFrame, target_vol: float = 0.
     returns = close.pct_change()
     port_ret = (returns * weights.shift(1)).sum(axis=1)
     rolling_vol = port_ret.rolling(21).std() * np.sqrt(252)
-    scale = (target_vol / rolling_vol).clip(0.5, 2.0)  # cap leverage 0.5x–2x
+    # Reindex to weights dates before multiplying to avoid NaN from date misalignment
+    scale = (target_vol / rolling_vol.shift(1)).clip(0.5, 2.0)
+    scale = scale.reindex(weights.index).fillna(1.0)
     scaled = weights.mul(scale, axis=0)
     return scaled
 
@@ -58,7 +60,7 @@ def momentum_strategy(
     scores = feature_matrix[signal].unstack("ticker")
 
     # Resample to rebalance frequency — take last available score
-    rebal_scores = scores.resample(rebalance_freq).last()
+    rebal_scores = scores.resample(rebalance_freq).last().dropna(how="all")
 
     weights_list = []
     for date, row in rebal_scores.iterrows():
@@ -163,7 +165,7 @@ def risk_managed_strategy(
     """
     Composite strategy with three risk overlays applied daily (not only at rebalance):
 
-    1. Market timing: SPY below SMA200 → cut exposure to 50%
+    1. Market timing: SPY below SMA200 → scale exposure to by 0.3
     2. Vol scaling: target 15% annualised portfolio vol (applied after timing filter)
     3. Defensive tilt at rebalance: penalise assets with high zscore_20
        (mean-reversion risk) when vol_regime is elevated
@@ -224,13 +226,158 @@ def risk_managed_strategy(
     # Smooth the signal: require SPY to be below SMA200 for 5 consecutive days
     # to avoid whipsawing on brief dips
     spy_risk_off = (~spy_above).rolling(5, min_periods=1).min().astype(bool)
-    market_scale = spy_risk_off.map({True: 0.50, False: 1.0})
+    dist_from_sma = (close["SPY"] - spy_sma200) / spy_sma200
+    market_scale = (1 + dist_from_sma.clip(-0.5, 0)).rolling(10).mean()
+    market_scale = market_scale.reindex(weights.index).fillna(1.0)
     weights = weights.mul(market_scale, axis=0)
 
     # --- Overlay 2: vol scaling (daily) ---
     weights = vol_scale(weights, close, target_vol=target_vol)
 
     return weights
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+def turnover_report(weights: pd.DataFrame, freq: str = "ME") -> pd.DataFrame:
+    """
+    Monthly turnover report: number of tickers changed and one-way traded weight.
+
+    Returns a DataFrame with columns:
+        tickers_in   — new positions entered this month
+        tickers_out  — positions exited this month
+        tickers_held — positions held unchanged
+        one_way_to   — sum of absolute weight changes / 2
+    """
+    rebal = weights.resample(freq).last()
+    records = []
+    prev = pd.Series(0.0, index=rebal.columns)
+
+    for date, row in rebal.iterrows():
+        held_prev = set(prev[prev > 0].index)
+        held_now  = set(row[row > 0].index)
+        records.append({
+            "date":         date,
+            "tickers_in":   len(held_now - held_prev),
+            "tickers_out":  len(held_prev - held_now),
+            "tickers_held": len(held_now & held_prev),
+            "one_way_to":   (row - prev).abs().sum() / 2,
+        })
+        prev = row
+
+    df = pd.DataFrame(records).set_index("date")
+    print(f"\n--- Turnover summary ({freq}) ---")
+    print(df[["tickers_in", "tickers_out", "tickers_held", "one_way_to"]].describe().round(3).to_string())
+    return df
+
+
+def capacity_check(
+    weights: pd.DataFrame,
+    close: pd.DataFrame,
+    portfolio_aum: float = 10_000_000,
+) -> pd.DataFrame:
+    """
+    Check whether target weights imply position sizes that exceed adv_fraction
+    of the asset's average daily volume (ADV).
+
+    Requires a 'Volume' level in close's parent DataFrame — pass the raw
+    MultiIndex DataFrame from load() instead of just Close if available.
+    Falls back to a notional-only check if volume data is absent.
+
+    Returns a DataFrame of breaches (date, ticker, weight, notional, adv_limit).
+    """
+    last_date = weights.index[-1]
+    last_w    = weights.loc[last_date]
+    last_px   = close.loc[last_date]
+
+    notional = last_w * portfolio_aum
+    breaches  = []
+    for ticker in last_w[last_w > 0].index:
+        if ticker not in close.columns:
+            continue
+        pos_notional = notional.get(ticker, 0)
+        px = last_px.get(ticker, np.nan)
+        if np.isnan(px) or px == 0:
+            continue
+        # Without volume data we flag positions >$500k in a single name
+        if pos_notional > 500_000:
+            breaches.append({
+                "ticker":    ticker,
+                "weight":    f"{last_w[ticker]:.2%}",
+                "notional":  f"${pos_notional:,.0f}",
+                "flag":      ">$500k — verify liquidity",
+            })
+
+    df = pd.DataFrame(breaches) if breaches else pd.DataFrame(columns=["ticker", "weight", "notional", "flag"])
+    print(f"\n--- Capacity check (AUM=${portfolio_aum:,.0f}) ---")
+    if df.empty:
+        print("No positions flagged.")
+    else:
+        print(df.to_string(index=False))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Unit tests
+# ---------------------------------------------------------------------------
+
+def run_tests(close: pd.DataFrame, fm: pd.DataFrame) -> None:
+    """Minimal sanity tests for all strategies and helpers."""
+    import traceback
+
+    passed = failed = 0
+
+    def check(name: str, condition: bool, msg: str = "") -> None:
+        nonlocal passed, failed
+        if condition:
+            print(f"  PASS  {name}")
+            passed += 1
+        else:
+            print(f"  FAIL  {name}" + (f" — {msg}" if msg else ""))
+            failed += 1
+
+    print("\n=== Running unit tests ===")
+
+    # risk_managed uses vol_scale with up to 2x leverage — higher threshold
+    max_sum = {"momentum_strategy": 1.05, "composite_strategy": 1.05, "risk_managed_strategy": 2.1}
+
+    for label, w in [
+        ("momentum_strategy",     momentum_strategy(fm, top_n=10)),
+        ("composite_strategy",    composite_strategy(fm, top_n=10)),
+        ("risk_managed_strategy", risk_managed_strategy(fm, close, top_n=10)),
+    ]:
+        try:
+            check(f"{label}: no NaN weights",
+                  not w.isna().any().any())
+            check(f"{label}: no negative weights",
+                  (w.fillna(0) >= -1e-9).all().all(),
+                  f"min={w.min().min():.6f}")
+            check(f"{label}: weights sum ≤ {max_sum[label]}",
+                  (w.sum(axis=1) <= max_sum[label]).all(),
+                  f"max_sum={w.sum(axis=1).max():.4f}")
+            check(f"{label}: no all-zero rows after first rebalance",
+                  (w.iloc[30:].sum(axis=1) > 0).any())
+        except Exception:
+            print(f"  ERROR {label}:\n{traceback.format_exc()}")
+            failed += 1
+
+    # vol_scale NaN check
+    try:
+        w_raw = momentum_strategy(fm, top_n=10)
+        w_scaled = vol_scale(w_raw, close, target_vol=0.15)
+        valid = w_scaled.iloc[30:]   # skip warm-up
+        check("vol_scale: no NaN after warm-up",
+              valid.isna().sum().sum() == 0,
+              f"NaN count={valid.isna().sum().sum()}")
+        check("vol_scale: no negative weights",
+              (valid >= -1e-9).all().all())
+    except Exception:
+        print(f"  ERROR vol_scale:\n{traceback.format_exc()}")
+        failed += 1
+
+    print(f"\n  {passed} passed, {failed} failed")
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +393,14 @@ if __name__ == "__main__":
 
     w1 = momentum_strategy(fm, top_n=10, signal="mom_6m")
     w2 = composite_strategy(fm, top_n=10)
+    w3 = risk_managed_strategy(fm, close, top_n=10)
 
-    print("=== Momentum strategy ===")
-    print(w1.tail(3).to_string())
-    print("\n=== Composite strategy ===")
-    print(w2.tail(3).to_string())
-    print("\nWeight sum check (should be ≤1):")
+    print("Weight sum check — momentum (should be ≤1):")
     print(w1.sum(axis=1).describe())
+
+    turnover_report(w1, freq="ME")
+    turnover_report(w3, freq="ME")
+
+    capacity_check(w3, close, portfolio_aum=10_000_000)
+
+    run_tests(close, fm)

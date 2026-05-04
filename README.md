@@ -1,6 +1,6 @@
 # Quant Backtest — Systematic Equity Strategies
 
-A modular backtesting framework for cross-sectional equity strategies, built on top of momentum signals, composite scoring, and dynamic risk overlays. The system covers the full pipeline from raw price data to walk-forward validated performance metrics.
+A modular backtesting framework for cross-sectional equity strategies, built on top of momentum signals, composite scoring, dynamic risk overlays, and a professional-grade risk management module. The system covers the full pipeline from raw price data to walk-forward validated performance metrics and VaR calibration testing.
 
 ---
 
@@ -11,6 +11,7 @@ A modular backtesting framework for cross-sectional equity strategies, built on 
 - [Strategies](#strategies)
 - [Results](#results)
 - [Walk-Forward Validation](#walk-forward-validation)
+- [Risk Management Module](#risk-management-module)
 - [Risk & Cost Assumptions](#risk--cost-assumptions)
 - [Limitations & Known Issues](#limitations--known-issues)
 - [Setup](#setup)
@@ -22,6 +23,8 @@ A modular backtesting framework for cross-sectional equity strategies, built on 
 The project implements and compares three increasingly sophisticated equity strategies on a universe of ~140 US large-cap assets (2016–2026), evaluated with strict walk-forward out-of-sample validation to prevent overfitting.
 
 The three strategies represent a deliberate spectrum of risk profiles: Momentum and Composite are high-beta, high-return strategies suited to investors who can tolerate drawdowns above 30%; Risk-Managed targets a lower-drawdown profile at the cost of absolute return. All three outperform SPY on a risk-adjusted basis in out-of-sample testing.
+
+The project includes a standalone `risk.py` module implementing VaR estimation, CVaR, GARCH-based conditional volatility, and formal statistical backtesting of risk model calibration via the Kupiec Proportion of Failures test.
 
 ---
 
@@ -35,7 +38,8 @@ quant-backtest/
 │   ├── strategy.py      # Strategy implementations (weights generation)
 │   ├── backtest.py      # Backtest engine with commissions and slippage
 │   ├── metrics.py       # Performance metrics (Sharpe, Calmar, CVaR, etc.)
-│   └── walkforward.py   # Walk-forward validation engine
+│   ├── walkforward.py   # Walk-forward validation engine
+│   └── risk.py          # Risk management module (VaR, CVaR, GARCH, Kupiec)
 ├── notebooks/
 │   └── analysis.ipynb   # Equity curves, drawdowns, heatmaps, WF analysis
 ├── data/
@@ -127,6 +131,86 @@ Momentum is the most consistent strategy: 93% of folds with positive Sharpe and 
 
 ---
 
+## Risk Management Module
+
+`src/risk.py` implements a self-contained risk management layer that can be run independently of the backtest engine. It provides point estimates, rolling out-of-sample series, and formal statistical calibration tests for all three strategies and SPY.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `var(returns, confidence, method)` | VaR point estimate — historical, parametric (Student-t), or Monte Carlo |
+| `cvar(returns, confidence, method)` | Conditional VaR (Expected Shortfall) — analytical for parametric, empirical for others |
+| `rolling_var_series(returns, confidence, method, window)` | Rolling out-of-sample VaR series on a 252-day expanding window |
+| `garch_var_series(returns, confidence, window)` | Rolling GARCH(1,1)-based VaR using conditional volatility forecasts |
+| `kupiec_test(returns, confidence, method, var_series)` | Kupiec Proportion of Failures test — LR statistic and p-value |
+| `kupiec_table(strategy_returns, confidences, method)` | Full calibration table across strategies and confidence levels |
+| `violation_ratio(returns, confidence, method)` | Breach rate / expected rate with Basel traffic-light zone classification |
+
+### VaR Methods
+
+Three estimation methods are available across all functions via `method: Literal["historical", "parametric", "monte_carlo", "garch"]`:
+
+**Historical:** empirical quantile of the past 252 daily returns. No distributional assumptions. Accurate at 90–95% confidence; tends to underestimate tail risk at 99% due to insufficient extreme events in the rolling window.
+
+**Parametric:** closed-form VaR and CVaR using a fitted Student-t distribution (MLE). Captures fat tails better than the normal approximation. Tends to overestimate risk at 90–95% because the t distribution imposes heavier tails than the empirical data supports in the central body.
+
+**Monte Carlo:** simulates 10,000 scenarios from a fitted Student-t distribution. Seed-fixed for reproducibility. Consistent with parametric by construction; preferred when analytical CVaR is unavailable (e.g., for non-standard payoff structures).
+
+**GARCH:** fits a GARCH(1,1) model with Student-t innovations on a rolling 252-day window, forecasts one-step-ahead conditional volatility $\sigma_{t}$, and computes $\text{VaR}_t = -(\mu_t + \sigma_t \cdot z_\alpha)$. Reacts to volatility clustering immediately, making it well-calibrated at 99% confidence where tail events cluster in time.
+
+### Kupiec Calibration Results
+
+The Kupiec Proportion of Failures test evaluates whether the observed breach rate is statistically consistent with the expected rate $(1 - \alpha)$, using a likelihood ratio statistic distributed as $\chi^2(1)$ under the null hypothesis of correct calibration.
+
+**Historical VaR — Kupiec p-values:**
+
+| Strategy | 90% | 95% | 99% |
+|---|---|---|---|
+| Momentum | 0.443 | 0.344 | **0.025 ✗** |
+| Composite | 0.670 | 0.160 | **0.009 ✗** |
+| Risk-Managed | 0.241 | 0.631 | 0.187 |
+| SPY | 0.087 | 0.504 | **0.001 ✗** |
+
+**GARCH VaR — Kupiec p-values:**
+
+| Strategy | 90% | 95% | 99% |
+|---|---|---|---|
+| Momentum | **0.007 ✗** | 0.640 | 0.593 |
+| Composite | **0.002 ✗** | 0.294 | 0.739 |
+| Risk-Managed | **0.000 ✗** | **0.005 ✗** | 0.163 |
+| SPY | **0.000 ✗** | **0.032 ✗** | 0.772 |
+
+### Interpretation
+
+The two methods have complementary failure modes:
+
+- **Historical** fails at 99% for Momentum, Composite, and SPY (violation ratios 1.50, 1.58, 1.75). The 252-day rolling window reacts too slowly to volatility explosions — the VaR is still calibrated on calm prior periods when a crash hits.
+- **GARCH** fails at 90% for all strategies. GARCH models conditional variance but not the mean or skewness of returns. At 90% confidence, the central body of the distribution dominates — where distributional shape matters more than volatility dynamics — and GARCH systematically overestimates risk, producing too few breaches.
+
+**Operational recommendation by confidence level:**
+
+| Level | Recommended method | Rationale |
+|---|---|---|
+| 90% | Historical | Empirical distribution captures shape better than GARCH at short horizons |
+| 95% | Historical | Same reasoning; both methods acceptable |
+| 99% | GARCH | Volatility clustering dominates fat tails; GARCH passes Kupiec, Historical fails |
+
+**Risk-Managed exception:** Historical passes at all three confidence levels for Risk-Managed. The vol scaling overlay already reduces exposure during high-volatility periods, making the GARCH adjustment redundant and causing overcorrection (violation ratio 0.73 at 99% under GARCH). Use Historical for Risk-Managed at all confidence levels.
+
+### GARCH vs Historical VaR — Divergence as a Signal
+
+The spread between GARCH and Historical VaR estimates functions as a real-time regime change indicator. When GARCH raises the VaR significantly above the Historical estimate, it signals that recent volatility has increased faster than the rolling window can incorporate. Key divergence events visible in the data:
+
+- **Q4 2018:** GARCH raised VaR by 3–5% above Historical ahead of the correction
+- **March 2020:** peak divergence of ~15% across all strategies — the largest signal in the sample
+- **2022 H1:** moderate divergence during the Fed tightening shock
+- **2025:** renewed divergence of ~5–10% correlated with tariff-driven volatility
+
+A divergence threshold of 2–3% in absolute terms can be used operationally to trigger increased monitoring and reduced position sizing.
+
+---
+
 ## Risk & Cost Assumptions
 
 | Parameter | Value | Notes |
@@ -136,6 +220,8 @@ Momentum is the most consistent strategy: 93% of folds with positive Sharpe and 
 | Execution | Next open after signal | Avoids look-ahead bias on close prices |
 | Rebalancing | Month-end | Risk overlays applied daily (Risk-Managed only) |
 | Max leverage | 2.0x | Hard cap in vol scaling (`clip(0.5, 2.0)`) |
+| VaR window | 252 days | Rolling estimation window for historical and GARCH methods |
+| GARCH spec | GARCH(1,1), Student-t | Fitted via MLE; convergence failures fall back to historical |
 
 Transaction costs are simulated as `turnover × 2 × commission_rate`. At median monthly one-way turnover of ~19% (Momentum) and ~30% (Composite), annual cost drag is approximately 45–70 bps — material but not dominant relative to the Alpha generated.
 
@@ -148,6 +234,8 @@ Transaction costs are simulated as `turnover × 2 × commission_rate`. At median
 - **No explicit sector constraints.** In periods of strong factor concentration (e.g., AI/tech in 2024), the portfolio can become an implicit sector bet. A sector exposure breakdown over time is a planned addition.
 - **Turnover bug (Composite strategy):** max one-way turnover exceeds 100% in some months, indicating an accounting issue in the turnover calculation. Under investigation.
 - **Momentum crash risk.** All three strategies have meaningful exposure to momentum factor reversals (see Fold 7). There is no explicit protection against rapid regime changes.
+- **Kupiec independence not tested.** The Kupiec test evaluates unconditional breach frequency only. The Christoffersen (1998) conditional coverage test — which additionally tests for temporal independence of breaches — is not yet implemented. Breach clustering during systemic crises (March 2020, 2022 H1) is expected and not captured by the current testing framework.
+- **GARCH stationarity assumption.** The rolling GARCH fit assumes a stationary volatility process within each 252-day window. Structural breaks (e.g., the 2020 regime change) can cause convergence failures, which are handled by falling back to historical VaR for the affected windows.
 
 ---
 
@@ -168,6 +256,11 @@ jupyter notebook notebooks/analysis.ipynb
 ```bash
 python src/strategy.py    # prints last weights for all three strategies
 python src/walkforward.py # runs full walk-forward validation
+```
+
+**Run the risk module:**
+```bash
+python src/risk.py        # prints VaR/CVaR table and Kupiec results for all strategies
 ```
 
 **Dependencies:** `pandas`, `numpy`, `yfinance`, `scipy`, `matplotlib`, `seaborn`, `lightgbm`, `arch`

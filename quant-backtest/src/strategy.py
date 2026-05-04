@@ -227,11 +227,7 @@ def risk_managed_strategy(
     # --- Overlay 1: market timing (daily) ---
     spy_sma200 = close["SPY"].rolling(200).mean()
     dist_pct = (close["SPY"] - spy_sma200) / spy_sma200  # distanza % dalla SMA200
-    
-# Quando dist_pct = 0   → SPY sulla SMA200   → scale = 1.0  (piena esposizione)
-# Quando dist_pct = -0.05 → SPY -5% sotto    → scale ~0.75
-# Quando dist_pct = -0.10 → SPY -10% sotto   → scale ~0.50
-# Quando dist_pct > 0    → SPY sopra SMA200  → scale = 1.0  (cappato a 1)
+
     market_scale = (1 + dist_pct * 5).clip(0.3, 1.0).rolling(5, min_periods=1).mean().clip(0.30, 1.0)
     market_scale = market_scale.reindex(weights.index).fillna(1.0)
     weights = weights.mul(market_scale, axis=0)

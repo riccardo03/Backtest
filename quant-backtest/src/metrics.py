@@ -72,18 +72,6 @@ def avg_win_loss(returns: pd.Series) -> float:
     return wins / losses if losses != 0 else np.nan
 
 
-def value_at_risk(returns: pd.Series, confidence: float = 0.95) -> float:
-    """Historical VaR at given confidence level (positive number = loss)."""
-    return -returns.quantile(1 - confidence)
-
-
-def expected_shortfall(returns: pd.Series, confidence: float = 0.95) -> float:
-    """CVaR / Expected Shortfall."""
-    threshold = returns.quantile(1 - confidence)
-    tail = returns[returns <= threshold]
-    return -tail.mean() if len(tail) > 0 else np.nan
-
-
 # ---------------------------------------------------------------------------
 # Benchmark comparison
 # ---------------------------------------------------------------------------
@@ -184,8 +172,6 @@ def summary(
         "Max Drawdown":      f"{max_drawdown(equity):.2%}",
         "Win Rate":          f"{win_rate(returns):.2%}",
         "Avg Win / Loss":    f"{avg_win_loss(returns):.2f}",
-        "VaR 95%  (daily)":  f"{value_at_risk(returns):.2%}",
-        "CVaR 95% (daily)":  f"{expected_shortfall(returns):.2%}",
     }
 
     if benchmark_ret is not None:
